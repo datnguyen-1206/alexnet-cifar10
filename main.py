@@ -7,6 +7,7 @@ import datetime
 import yaml
 import argparse
 import wandb
+import pprint
 
 from utils import *
 from dataloader import *
@@ -26,29 +27,31 @@ args = parser.parse_args()
 yaml_filepath = os.path.join(".", "config", f"{args.experiment}.yaml")
 with open(yaml_filepath, "r") as yamlfile:
     cfg = yaml.load(yamlfile, Loader=yaml.Loader)
+    pprint.pprint(cfg)
+
+EPOCHS = cfg['trainer']['epochs']
 
 wandb.init(
-    project=cfg['data_name'], 
-    name=f"{cfg['model_name']}-bs{cfg['batch_size']}-lr{cfg['learning_rate']}-wd{cfg['weight_decay']}", 
+    project=cfg['dataset']['data_name'], 
+    name="config_vgg", 
 )
 log_dict = {}
+test_dict = {}
 
 ################################
 #### 1. BUILD THE DATASET
 ################################
-train_dataloader, val_dataloader, test_dataloader, classes = get_dataloader(
-    data=cfg['data_name'], 
-    data_augmentation='basic', 
-    batch_size=cfg['batch_size'], 
-    num_workers=cfg['num_workers']
-)
-
+train_dataloader, val_dataloader, test_dataloader, classes = get_dataloader(**cfg['dataset'])
+try:
+    num_classes = len(classes)
+except:
+    num_classes = classes
 ################################
 #### 2. BUILD THE NEURAL NETWORK
 ################################
 model = get_model(
-    name=cfg['model_name'], 
-    num_classes=len(classes)
+    **cfg['model'],
+    num_classes=num_classes,
 )
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model.to(device)
@@ -59,15 +62,14 @@ model.to(device)
 loss_fn = nn.CrossEntropyLoss()
 optimizer = optim.SGD(
     model.parameters(), 
-    lr=cfg['learning_rate'],
-    weight_decay=cfg['weight_decay']
+    **cfg['optimizer']
 )
 
 ################################
 #### 3.b Training 
 ################################
 if __name__ == '__main__':
-    for epoch in range(cfg['epochs']):
+    for epoch in range(EPOCHS):
         print(f"Epoch {epoch+1}\n-------------------------------")
         train_one_epoch(
             dataloader=train_dataloader, 
@@ -75,7 +77,6 @@ if __name__ == '__main__':
             loss_fn=loss_fn, 
             optimizer=optimizer, 
             device=device, 
-            batch_size=cfg['batch_size'],
             log_dict=log_dict
         )
         
@@ -91,30 +92,34 @@ if __name__ == '__main__':
         )
         
         wandb.log(log_dict)
+        
     test_one_epoch(
         dataloader=test_dataloader, 
         model=model, 
         loss_fn=loss_fn,
         device=device,
-        current_time=current_time
+        current_time=current_time,
+        log_dict=test_dict
     )
     
+    wandb.log(test_dict)
+
     ################################
     #### 3.c Testing on each class
     ################################
-    class_correct = list(0. for _ in range(len(classes)))
-    class_total = list(0. for _ in range(len(classes)))
-    with torch.no_grad():
-        for data in test_dataloader:
-            images, labels = data[0].to(device), data[1].to(device)
-            outputs = model(images)
-            _, predicted = torch.max(outputs, 1)
-            c = (predicted == labels).squeeze()
-            for i in range(4):
-                label = labels[i]
-                class_correct[label] += c[i].item()
-                class_total[label] += 1
-
-    for i in range(len(classes)):
-        print('Accuracy of %5s : %2d %%' % (
-            classes[i], 100 * class_correct[i] / class_total[i]))
+    if isinstance(classes, list):
+        class_correct = list(0. for _ in range(num_classes))
+        class_total = list(0. for _ in range(num_classes))
+        with torch.no_grad():
+            for data in test_dataloader:
+                images, labels = data[0].to(device), data[1].to(device)
+                outputs = model(images)
+                _, predicted = torch.max(outputs, 1)
+                c = (predicted == labels).squeeze()
+                for i in range(4):
+                    label = labels[i]
+                    class_correct[label] += c[i].item()
+                    class_total[label] += 1
+        table_data = [{classes[i]: 100 * class_correct[i]} for i in range(num_classes)]
+        table = wandb.Table(data=table_data, columns=["Class", "Accuracy"])
+        wandb.log({"Test Accuracy per Class": table})
